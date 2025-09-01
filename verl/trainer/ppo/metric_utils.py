@@ -26,6 +26,105 @@ from verl import DataProto
 from verl.utils.import_utils import deprecated
 
 
+def compute_classification_metrics_at_k(
+    uid2preds: dict[str, list[str]], uid2labels: dict[str, str], k_values: list[int] = None, seed: int = 42
+) -> dict[str, float]:
+    """
+    Compute classification metrics at different k values for validation data.
+
+    This function calculates acc@k, precision@k, recall@k, f1@k metrics by:
+    1. For each k, selecting the first k predictions for each sample
+    2. If any of the first k predictions matches the true label, use the first correct one as final prediction
+    3. If all k predictions are wrong, randomly select one as final prediction
+    4. Compute macro-averaged classification metrics on the entire dataset
+
+    Args:
+        uid2preds: Dictionary mapping sample UIDs to lists of predicted labels
+        uid2labels: Dictionary mapping sample UIDs to true labels
+        k_values: List of k values to compute metrics for. If None, uses [1, 2, 4, 8] up to max predictions
+        seed: Random seed for reproducible selection when all predictions are wrong
+
+    Returns:
+        Dictionary containing classification metrics for different k values,
+        e.g., {"acc@1": 0.8, "precision@2": 0.9, "recall@4": 0.85, "f1@8": 0.87}
+    """
+    import random
+
+    from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+
+    random.seed(seed)
+
+    # Ensure we have predictions for all labels
+    common_uids = set(uid2preds.keys()) & set(uid2labels.keys())
+    if len(common_uids) == 0:
+        return {}
+
+    # Convert to lists for easier processing
+    y_true = [uid2labels[uid] for uid in common_uids]
+    y_pred_multi = [uid2preds[uid] for uid in common_uids]
+
+    # Determine k values if not provided
+    max_preds = max(len(preds) for preds in y_pred_multi) if y_pred_multi else 1
+    if k_values is None:
+        k_values = []
+        k = 1
+        while k <= max_preds:
+            k_values.append(k)
+            if k == 1:
+                k = 2
+            else:
+                k *= 2
+        # Always include the maximum number of predictions
+        if max_preds not in k_values:
+            k_values.append(max_preds)
+    else:
+        # Filter k_values to not exceed available predictions
+        k_values = [k for k in k_values if k <= max_preds]
+
+    if not k_values:
+        return {}
+
+    # Get unique labels from true labels only for consistent metric calculation
+    labels = list(set(y_true))
+
+    metrics = {}
+
+    for k in k_values:
+        # Collect final predictions for this k value
+        final_predictions = []
+
+        for i, (true_label, pred_list) in enumerate(zip(y_true, y_pred_multi, strict=False)):
+            # Take first k predictions (or all if less than k)
+            k_preds = pred_list[:k]
+
+            if not k_preds:
+                raise ValueError(f"Sample {i} has no predictions")
+
+            # Find correct predictions in the first k
+            correct_preds = [pred for pred in k_preds if pred == true_label]
+
+            if correct_preds:
+                # If there's at least one correct prediction, use the first one
+                final_pred = correct_preds[0]
+            else:
+                # If all are wrong, randomly select one from the first k
+                final_pred = random.choice(k_preds)
+
+            final_predictions.append(final_pred)
+
+        # Compute classification metrics for this k value
+        metrics[f"acc@{k}"] = accuracy_score(y_true, final_predictions)
+        metrics[f"precision@{k}"] = precision_score(
+            y_true, final_predictions, labels=labels, average="macro", zero_division=0
+        )
+        metrics[f"recall@{k}"] = recall_score(
+            y_true, final_predictions, labels=labels, average="macro", zero_division=0
+        )
+        metrics[f"f1@{k}"] = f1_score(y_true, final_predictions, labels=labels, average="macro", zero_division=0)
+
+    return metrics
+
+
 @deprecated("verl.utils.metric.reduce_metrics")
 def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
     """
@@ -486,5 +585,33 @@ def process_validation_metrics(
         for var_name, metric2uid_vals in var2metric2uid_vals.items():
             for metric_name, uid_vals in metric2uid_vals.items():
                 data_src2var2metric2val[data_source][var_name][metric_name] = np.mean(uid_vals)
+
+    # Compute classification metrics at different k values if we have predictions and true labels
+    if "predicted_class" in infos_dict and "true_class" in infos_dict:
+        for data_source in data_src2uid2var2vals.keys():
+            uid2var2vals = data_src2uid2var2vals[data_source]
+
+            # Extract predictions and true labels for this data source
+            uid2preds = {}
+            uid2labels = {}
+
+            for uid, var2vals in uid2var2vals.items():
+                if "predicted_class" in var2vals and "true_class" in var2vals:
+                    uid2preds[uid] = var2vals["predicted_class"]
+                    # true_class should be the same for all responses of the same uid
+                    uid2labels[uid] = var2vals["true_class"][0]
+
+            if uid2preds and uid2labels:
+                # Compute classification metrics at k
+                classification_metrics = compute_classification_metrics_at_k(
+                    uid2preds=uid2preds,
+                    uid2labels=uid2labels,
+                    k_values=None,  # Will auto-determine k values
+                    seed=seed,
+                )
+
+                # Add classification metrics to the result
+                for metric_name, metric_val in classification_metrics.items():
+                    data_src2var2metric2val[data_source]["classification"][metric_name] = metric_val
 
     return data_src2var2metric2val
