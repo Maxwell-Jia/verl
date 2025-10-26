@@ -21,6 +21,76 @@ from verl.utils.model import compute_position_id_with_mask
 logger = logging.getLogger(__name__)
 
 
+def _match_supernova_class(text: str, valid_classes: list) -> str:
+    """
+    Flexible matching for supernova class names.
+
+    Args:
+        text: Text to match against valid classes
+        valid_classes: List of valid supernova class names
+
+    Returns:
+        Matched class name or empty string if no match
+    """
+    text_clean = text.strip()
+
+    # First try exact match (case insensitive)
+    for cls in valid_classes:
+        if text_clean.upper() == cls.upper():
+            return cls
+
+    # Try partial matching for common variations
+    text_upper = text_clean.upper()
+    for cls in valid_classes:
+        cls_upper = cls.upper()
+
+        # Handle variations like "SN IA" -> "SN Ia (Normal)"
+        if cls_upper == "SN IA (NORMAL)" and text_upper in ["SN IA", "SN Ia", "IA"]:
+            return cls
+        elif cls_upper == "SN IAX[02CX-LIKE]" and text_upper in ["SN IAX", "SN Iax", "IAX"]:
+            return cls
+        elif cls_upper.replace(" ", "").replace("-", "").replace("[", "").replace("]", "") == text_upper.replace(
+            " ", ""
+        ).replace("-", "").replace("[", "").replace("]", ""):
+            return cls
+
+    return ""
+
+
+def _extract_answer_fallback(text: str, valid_classes: list, task_type: str) -> str:
+    """
+    Fallback method to extract answer from text when boxed format is missing.
+
+    Args:
+        text: Text to search for answer
+        valid_classes: List of valid classes
+        task_type: "binary" or "multiclass"
+
+    Returns:
+        Extracted answer or empty string if no match
+    """
+    if task_type == "binary":
+        # For binary classification, use regex patterns
+        patterns = [r"\b(YES)\b", r"\b(NO)\b"]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1).upper()
+    else:
+        # For multiclass, try to find any valid class in the text
+        for cls in valid_classes:
+            # Try exact match first
+            if cls.upper() in text.upper():
+                return cls
+
+            # Try flexible matching
+            matched = _match_supernova_class(text, [cls])
+            if matched:
+                return matched
+
+    return ""
+
+
 class CustomRLHFDataset(RLHFDataset):
     def __getitem__(self, item):
         """
@@ -146,12 +216,12 @@ def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_
     - Additional classification metrics for validation purposes
 
     Reward components:
-    - Accuracy reward (0.8 weight): Whether the answer matches the ground truth
+    - Accuracy reward (1.0 weight): Whether the answer matches the ground truth
     - Format reward (0.2 weight): Whether the output follows expected \\boxed{} format
-    - Tool reward (1.2 weight): Whether tools were used when answer is correct
+    - Tool reward (1.0 weight): Whether tools were used when answer is correct
 
     Args:
-        data_source: Source of the data
+        data_source: Source of the data (lamost_cv for YES/NO, tns_sn for 10-class)
         solution_str: Model's solution string
         ground_truth: Ground truth answer
         extra_info: Dictionary to store additional metrics for validation (legacy parameter)
@@ -160,35 +230,161 @@ def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_
         Dictionary with 'score' field and additional classification metrics
     """
 
+    # Define valid answer classes based on data source
+    if data_source in ["cv", "carbon", "cc", "ss", "wd", "gm"]:
+        # YES/NO binary classification
+        valid_classes = ["YES", "NO"]
+        task_type = "binary"
+    elif data_source == "lamost_cv_galaxy":
+        # 3-class classification: CV / GALAXY / OTHER
+        valid_classes = ["CV", "GALAXY", "OTHER"]
+        task_type = "multiclass"
+    elif data_source == "tns":
+        # 10-class supernova classification
+        valid_classes = [
+            "SN IIP",
+            "SN IIb",
+            "SN Ia (Normal)",
+            "SN Ia-91T-like",
+            "SN Ia-91bg-like",
+            "SN Iax[02cx-like]",
+            "SN Ib",
+            "SN Ibn",
+            "SN Ic",
+            "SN Ic-BL",
+        ]
+        task_type = "multiclass"
+    else:
+        # Default to binary classification for backward compatibility
+        valid_classes = ["YES", "NO"]
+        task_type = "binary"
+        logger.warning(f"Unknown data_source: {data_source}, defaulting to binary classification")
+
     # Initialize tracking variables
     is_format_error = False
 
-    # 1. Extract answer from \\boxed{} format
+    # 1. Strict format validation for structured response
     answer_text = ""
 
-    # Look for \\boxed{...} pattern
-    boxed_match = re.search(r"\\boxed\{([^}]*)\}", solution_str)
-    if boxed_match:
-        answer_text = boxed_match.group(1).strip()
-    else:
-        # No \\boxed{} found - this is a format error
+    # Check for required structure: <think>...</think> and <answer>...</answer>
+    # Check think tags - allow multiple pairs but must be properly matched
+    think_open_count = len(re.findall(r"<think>", solution_str))
+    think_close_count = len(re.findall(r"</think>", solution_str))
+
+    # Check answer tags - must be exactly one pair
+    answer_open_count = len(re.findall(r"<answer>", solution_str))
+    answer_close_count = len(re.findall(r"</answer>", solution_str))
+    answer_matches = re.findall(r"<answer>(.*?)</answer>", solution_str, re.DOTALL)
+
+    # Validate think tags - allow multiple but must be properly paired
+    if think_open_count != think_close_count or think_open_count == 0:
         is_format_error = True
+        if think_open_count != think_close_count:
+            logger.debug(f"Mismatched <think> tags: {think_open_count} opening, {think_close_count} closing")
+        else:
+            logger.debug("Missing <think>...</think> tags")
 
-        # Fallback: try to extract supernova classification from text
-        # Common supernova types to look for
-        sn_patterns = [
-            r"\b(SN\s*I[abc]?(?:\-[A-Za-z0-9\-]+)?)\b",  # SN Ia, SN Ib, SN Ic, etc.
-            r"\b(Type\s*I[abc]?(?:\-[A-Za-z0-9\-]+)?)\b",  # Type Ia, Type Ib, etc.
-            r"\b(SN\s*II[LP]?(?:\-[A-Za-z0-9\-]+)?)\b",  # SN II, SN IIP, SN IIL, etc.
-            r"\b(Type\s*II[LP]?(?:\-[A-Za-z0-9\-]+)?)\b",  # Type II, Type IIP, etc.
-            r"\b([A-Za-z0-9\-]+\-like)\b",  # 91T-like, 91bg-like, etc.
-        ]
+    # Validate answer tags - must be exactly one pair
+    if answer_open_count != 1 or answer_close_count != 1:
+        is_format_error = True
+        logger.debug(
+            f"Invalid <answer> tags: {answer_open_count} opening, {answer_close_count} closing - must be exactly 1 pair"
+        )
 
-        for pattern in sn_patterns:
-            match = re.search(pattern, solution_str, re.IGNORECASE)
-            if match:
-                answer_text = match.group(1).strip()
-                break
+    if not answer_matches:
+        is_format_error = True
+        logger.debug("Missing <answer>...</answer> tags")
+    elif len(answer_matches) != 1:
+        # Multiple <answer> tags found - this is a format error since we only allow exactly one pair
+        is_format_error = True
+        logger.debug(f"Multiple <answer> tags found: {len(answer_matches)} - only exactly 1 pair allowed")
+        # Use the last answer tag as fallback
+        answer_content = answer_matches[-1].strip()
+
+        # Look for \\boxed{...} pattern within the answer section
+        boxed_match = re.search(r"\\boxed\{([^}]*)\}", answer_content)
+        if boxed_match:
+            boxed_content = boxed_match.group(1).strip()
+
+            # Validate based on task type
+            if task_type == "binary":
+                if boxed_content.upper() in valid_classes:
+                    answer_text = boxed_content.upper()
+                else:
+                    is_format_error = True
+                    logger.debug(f"Invalid boxed content: '{boxed_content}', expected {valid_classes}")
+                    answer_text = boxed_content  # Use as-is for partial credit
+            else:  # multiclass
+                # For multiclass, use flexible matching
+                matched_class = _match_supernova_class(boxed_content, valid_classes)
+                if matched_class:
+                    answer_text = matched_class
+                else:
+                    is_format_error = True
+                    logger.debug(f"Invalid boxed content: '{boxed_content}', expected one of {valid_classes}")
+                    answer_text = boxed_content  # Use as-is for partial credit
+        else:
+            # No \\boxed{} found within <answer> tags - this is a format error
+            is_format_error = True
+            logger.debug("Missing \\boxed{} within <answer> tags")
+
+            # Fallback: try to extract valid class from answer content
+            answer_text = _extract_answer_fallback(answer_content, valid_classes, task_type)
+    else:
+        # Exactly one <answer> tag found - normal case
+        answer_content = answer_matches[0].strip()
+
+        # Look for \\boxed{...} pattern within the answer section
+        boxed_match = re.search(r"\\boxed\{([^}]*)\}", answer_content)
+        if boxed_match:
+            boxed_content = boxed_match.group(1).strip()
+
+            # Validate based on task type
+            if task_type == "binary":
+                if boxed_content.upper() in valid_classes:
+                    answer_text = boxed_content.upper()
+                else:
+                    is_format_error = True
+                    logger.debug(f"Invalid boxed content: '{boxed_content}', expected {valid_classes}")
+                    answer_text = boxed_content  # Use as-is for partial credit
+            else:  # multiclass
+                # For multiclass, use flexible matching
+                matched_class = _match_supernova_class(boxed_content, valid_classes)
+                if matched_class:
+                    answer_text = matched_class
+                else:
+                    is_format_error = True
+                    logger.debug(f"Invalid boxed content: '{boxed_content}', expected one of {valid_classes}")
+                    answer_text = boxed_content  # Use as-is for partial credit
+        else:
+            # No \\boxed{} found within <answer> tags - this is a format error
+            is_format_error = True
+            logger.debug("Missing \\boxed{} within <answer> tags")
+
+            # Fallback: try to extract valid class from answer content
+            answer_text = _extract_answer_fallback(answer_content, valid_classes, task_type)
+
+    # Final fallback if no structured format found
+    if not answer_text and is_format_error:
+        # First try to extract \boxed{} from entire solution
+        boxed_match = re.search(r"\\boxed\{([^}]*)\}", solution_str)
+        if boxed_match:
+            boxed_content = boxed_match.group(1).strip()
+            if task_type == "binary":
+                if boxed_content.upper() in valid_classes:
+                    answer_text = boxed_content.upper()
+                else:
+                    answer_text = boxed_content  # Use as-is for partial credit
+            else:  # multiclass
+                matched_class = _match_supernova_class(boxed_content, valid_classes)
+                if matched_class:
+                    answer_text = matched_class
+                else:
+                    answer_text = boxed_content  # Use as-is for partial credit
+
+        # If no \boxed{} found, try to extract valid class from entire solution
+        if not answer_text:
+            answer_text = _extract_answer_fallback(solution_str, valid_classes, task_type)
 
         # If still no match, use the last line as fallback
         if not answer_text:
@@ -216,11 +412,40 @@ def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_
     cleaned_answer = basic_cleanup(answer_text)
     cleaned_ground_truth = basic_cleanup(ground_truth)
 
-    # STRICT MATCHING: Only exact match after basic cleanup
-    if cleaned_answer == cleaned_ground_truth:
+    # ASYMMETRIC REWARD: Differentiate between TP/TN/FP/FN to combat class imbalance
+    # This addresses reward hacking where model always predicts majority class (NO)
+    #
+    # Design rationale for 1:10 positive:negative ratio:
+    # - TP (True Positive): Highest reward - finding rare positive samples is valuable
+    # - TN (True Negative): Small reward - correct but common outcome
+    # - FN (False Negative): Severe penalty - missing a rare positive is costly
+    # - FP (False Positive): Moderate penalty - false alarm is less severe than missing target
+    #
+    # Expected reward analysis:
+    # - Always predict NO: 0.1*(-1.5) + 0.9*(0.2) = -0.15 + 0.18 = +0.03 (slightly positive)
+    # - Always predict YES: 0.1*(1.5) + 0.9*(-0.3) = 0.15 - 0.27 = -0.12 (negative)
+    # - Perfect classifier: 0.1*(1.5) + 0.9*(0.2) = 0.15 + 0.18 = +0.33 (best)
+    #
+    # The design encourages learning to find positives while maintaining reasonable TN rate
+
+    is_correct = cleaned_answer == cleaned_ground_truth
+    is_positive_sample = (cleaned_ground_truth == "YES") if task_type == "binary" else (cleaned_ground_truth != "NO")
+
+    if is_correct and is_positive_sample:
+        # True Positive: Correctly identified positive sample
         acc_reward = 1.0
-    # No partial matching, substring matching, component matching, or normalization
-    # This eliminates all risk of overestimating accuracy
+    elif is_correct and not is_positive_sample:
+        # True Negative: Correctly identified negative sample
+        acc_reward = 1.0
+    elif not is_correct and is_positive_sample:
+        # False Negative: Missed a positive sample (most severe error)
+        acc_reward = 0.0
+    elif not is_correct and not is_positive_sample:
+        # False Positive: False alarm on negative sample
+        acc_reward = 0.0
+
+    # Note: For multiclass tasks (task_type != "binary"), this uses a simplified binary view
+    # where any non-default class is considered "positive". This can be refined further if needed.
 
     # Penalize excessively long answers
     # if len(answer_text) >= 500:
@@ -271,7 +496,7 @@ def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_
         extra_info["raw_solution"] = solution_str[:200]  # Truncated for logging
 
     # Final weighted score
-    final_score = 0.8 * acc_reward + 0.2 * format_reward + 1.2 * tool_reward
+    final_score = 1.0 * acc_reward + 0.2 * format_reward + 1.0 * tool_reward
 
     # Prepare result dictionary with score and additional metrics
     result = {
