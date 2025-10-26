@@ -85,7 +85,9 @@ def compute_classification_metrics_at_k(
         return {}
 
     # Get unique labels from true labels only for consistent metric calculation
-    labels = list(set(y_true))
+    # Valid labels are only YES and NO
+    valid_labels = {"YES", "NO"}
+    labels = ["NO", "YES"]  # Fixed order for binary classification
 
     metrics = {}
 
@@ -100,27 +102,38 @@ def compute_classification_metrics_at_k(
             if not k_preds:
                 raise ValueError(f"Sample {i} has no predictions")
 
-            # Find correct predictions in the first k
-            correct_preds = [pred for pred in k_preds if pred == true_label]
+            # Filter out invalid predictions (not YES or NO) - normalize predictions to valid labels
+            valid_k_preds = [pred for pred in k_preds if pred in valid_labels]
 
-            if correct_preds:
-                # If there's at least one correct prediction, use the first one
-                final_pred = correct_preds[0]
+            # Find correct predictions in the valid first k predictions
+            if valid_k_preds:
+                correct_preds = [pred for pred in valid_k_preds if pred == true_label]
+                if correct_preds:
+                    # If there's at least one correct prediction, use the first one
+                    final_pred = correct_preds[0]
+                else:
+                    # If all valid predictions are wrong, randomly select one from valid predictions
+                    final_pred = random.choice(valid_k_preds)
             else:
-                # If all are wrong, randomly select one from the first k
-                final_pred = random.choice(k_preds)
+                # If all k predictions are invalid, treat as wrong prediction
+                # Use a special marker that is neither YES nor NO to ensure it's counted as wrong
+                final_pred = "__INVALID__"
 
             final_predictions.append(final_pred)
 
         # Compute classification metrics for this k value
         metrics[f"acc@{k}"] = accuracy_score(y_true, final_predictions)
-        metrics[f"precision@{k}"] = precision_score(
-            y_true, final_predictions, labels=labels, average="macro", zero_division=0
-        )
-        metrics[f"recall@{k}"] = recall_score(
-            y_true, final_predictions, labels=labels, average="macro", zero_division=0
-        )
-        metrics[f"f1@{k}"] = f1_score(y_true, final_predictions, labels=labels, average="macro", zero_division=0)
+
+        # Use average=None to get per-class metrics (returns array in order of labels)
+        # labels = ["NO", "YES"], so index 1 corresponds to YES
+        precision_per_class = precision_score(y_true, final_predictions, labels=labels, average=None, zero_division=0)
+        recall_per_class = recall_score(y_true, final_predictions, labels=labels, average=None, zero_division=0)
+        f1_per_class = f1_score(y_true, final_predictions, labels=labels, average=None, zero_division=0)
+
+        # Extract metrics for YES class (index 1)
+        metrics[f"precision@{k}"] = precision_per_class[1]
+        metrics[f"recall@{k}"] = recall_per_class[1]
+        metrics[f"f1@{k}"] = f1_per_class[1]
 
     return metrics
 
