@@ -236,8 +236,8 @@ class SpectralVisualizationTool(BaseTool):
         self._instance_dict[instance_id] = {
             "wavelength": wavelength,
             "flux": flux,
-            "redshift": kwargs.get("redshift", 0.0),
-            "title": kwargs.get("title", "Supernova Spectrum"),
+            "redshift": kwargs.get("redshift", None),
+            "title": kwargs.get("title", "Spectrum"),
             "response": "",
             "reward": 0.0,
         }
@@ -256,7 +256,7 @@ class SpectralVisualizationTool(BaseTool):
 
         try:
             # Apply redshift correction to get rest frame wavelength for validation
-            if redshift > 0:
+            if redshift:
                 rest_wavelength = wavelength / (1 + redshift)
             else:
                 rest_wavelength = wavelength
