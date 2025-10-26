@@ -456,7 +456,7 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
-    def _maybe_log_val_generations(self, inputs, outputs, scores):
+    def _maybe_log_val_generations(self, inputs, outputs, images, scores):
         """Log a table of validation samples to the configured logger (wandb or swanlab)"""
 
         generations_to_log = self.config.trainer.log_val_generations
@@ -467,7 +467,7 @@ class RayPPOTrainer:
         import numpy as np
 
         # Create tuples of (input, output, score) and sort by input text
-        samples = list(zip(inputs, outputs, scores, strict=True))
+        samples = list(zip(inputs, outputs, scores, images, strict=True))
         samples.sort(key=lambda x: x[0])  # Sort by input text
 
         # Use fixed random seed for deterministic shuffling
@@ -508,6 +508,7 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
         sample_uids = []
+        sample_images = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -569,7 +570,12 @@ class RayPPOTrainer:
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
             output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
+            images = [
+                test_output_gen_batch[i].non_tensor_batch.get("multi_modal_data", []).get("image", [])
+                for i in range(len(test_output_gen_batch))
+            ]
             sample_outputs.extend(output_texts)
+            sample_images.extend(images)
 
             test_batch = test_batch.union(test_output_gen_batch)
             test_batch.meta_info["validate"] = True
@@ -595,7 +601,9 @@ class RayPPOTrainer:
 
             data_source_lst.append(test_batch.non_tensor_batch.get("data_source", ["unknown"] * reward_tensor.shape[0]))
 
-        self._maybe_log_val_generations(inputs=sample_inputs, outputs=sample_outputs, scores=sample_scores)
+        self._maybe_log_val_generations(
+            inputs=sample_inputs, outputs=sample_outputs, images=sample_images, scores=sample_scores
+        )
 
         # dump generations
         val_data_dir = self.config.trainer.get("validation_data_dir", None)

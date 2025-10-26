@@ -592,8 +592,10 @@ class AgentLoopWorker:
 
         # Add multi_modal_inputs to non_tensor_batch if any samples have them
         multi_modal_inputs_list = [input.multi_modal_inputs for input in inputs]
+        multi_modal_data_list = [input.multi_modal_data for input in inputs]
         if any(mmi is not None for mmi in multi_modal_inputs_list):
             non_tensor_batch["multi_modal_inputs"] = np.array(multi_modal_inputs_list, dtype=object)
+            non_tensor_batch["multi_modal_data"] = np.array(multi_modal_data_list, dtype=object)
 
         metrics = [input.metrics.model_dump() for input in inputs]
         return DataProto(

@@ -334,12 +334,18 @@ class ValidationGenerationsLogger:
 
         # Create column names
         headers = ["step", "input", "output", "score"]
-
-        swanlab_row_list = [[step, *sample] for sample in samples]
+        swanlab_row_list = [[step, *sample[:-1]] for sample in samples]
         swanlab_table.add(headers=headers, rows=swanlab_row_list)
+
+        swanlab_image_list = []
+        sample_images_list = [sample[-1] for sample in samples]
+        for i in range(len(sample_images_list)):
+            for j in range(len(sample_images_list[i])):
+                swanlab_image_list.append(swanlab.Image(sample_images_list[i][j], caption=f"sample_{i}_image_{j}"))
 
         # Log to swanlab
         swanlab.log({"val/generations": swanlab_table}, step=step)
+        swanlab.log({"val/generations_images": swanlab_image_list}, step=step)
 
     def log_generations_to_mlflow(self, samples, step):
         """Log validation generation to mlflow as artifacts"""
