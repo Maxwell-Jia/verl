@@ -25,7 +25,7 @@ def plot_spectrum(
     wavelength,
     flux,
     wavelength_range=None,
-    title="Supernova Spectrum",
+    title="Spectrum",
     line_color="blue",
     line_width=1.0,
     alpha=0.8,
@@ -161,22 +161,31 @@ def plot_spectrum(
 
     # 自动设置刻度间隔 - 优化了窄波长范围的显示
     wave_range = wavelength.max() - wavelength.min()
-    if wave_range > 5000:
+    if wave_range >= 5000:
         ax.xaxis.set_major_locator(MultipleLocator(1000))
         ax.xaxis.set_minor_locator(MultipleLocator(200))
-    elif wave_range > 1000:
+    elif wave_range >= 1000:
         ax.xaxis.set_major_locator(MultipleLocator(200))
         ax.xaxis.set_minor_locator(MultipleLocator(50))
-    elif wave_range > 200:
+    elif wave_range >= 500:
+        ax.xaxis.set_major_locator(MultipleLocator(100))
+        ax.xaxis.set_minor_locator(MultipleLocator(20))
+    elif wave_range >= 300:  # 新增：300-500Å范围，使用更稀疏的刻度
+        ax.xaxis.set_major_locator(MultipleLocator(100))
+        ax.xaxis.set_minor_locator(MultipleLocator(25))
+    elif wave_range >= 150:  # 优化：150-300Å范围，如6500-6700这种情况
         ax.xaxis.set_major_locator(MultipleLocator(50))
-        ax.xaxis.set_minor_locator(MultipleLocator(10))
-    elif wave_range > 50:  # 中等窄范围 50-200Å
+        ax.xaxis.set_minor_locator(MultipleLocator(25))
+    elif wave_range >= 100:  # 100-150Å范围
+        ax.xaxis.set_major_locator(MultipleLocator(25))
+        ax.xaxis.set_minor_locator(MultipleLocator(5))
+    elif wave_range >= 50:  # 50-100Å范围
         ax.xaxis.set_major_locator(MultipleLocator(10))
         ax.xaxis.set_minor_locator(MultipleLocator(2))
-    elif wave_range > 20:  # 窄范围 20-50Å
+    elif wave_range >= 20:  # 20-50Å范围w
         ax.xaxis.set_major_locator(MultipleLocator(5))
         ax.xaxis.set_minor_locator(MultipleLocator(1))
-    elif wave_range > 5:  # 很窄范围 5-20Å，如H-alpha
+    elif wave_range >= 5:  # 5-20Å范围，如H-alpha
         ax.xaxis.set_major_locator(MultipleLocator(2))
         ax.xaxis.set_minor_locator(MultipleLocator(0.5))
     else:  # 极窄范围 <5Å
