@@ -133,7 +133,7 @@ class ToolAgentLoop(AgentLoopBase):
             if any(isinstance(item, Exception) for item in tool_responses):
                 break
 
-            # Extract messages and update multi_modal_data
+            # Extract messages and collect new images for this turn
             tool_messages = []
             new_images_this_turn = []
             for tool_response in tool_responses:
@@ -154,19 +154,11 @@ class ToolAgentLoop(AgentLoopBase):
 
                 tool_messages.append(message)
 
-                # Handle image data
+                # Collect new images for this turn (don't add to image_data yet)
                 if tool_response.image:
-                    if image_data is None:
-                        image_data = []
-                    elif not isinstance(image_data, list):
-                        image_data = [image_data]
-
-                    # Add new image data
                     if isinstance(tool_response.image, list):
-                        image_data.extend(tool_response.image)
                         new_images_this_turn.extend(tool_response.image)
                     else:
-                        image_data.append(tool_response.image)
                         new_images_this_turn.append(tool_response.image)
 
                 # Handle video data
@@ -202,6 +194,14 @@ class ToolAgentLoop(AgentLoopBase):
             # can't be propagated to previous token in GAE.
             if len(response_mask) + len(tool_response_ids) >= self.response_length:
                 break
+
+            # Only add images to image_data after confirming we won't break due to length
+            if new_images_this_turn:
+                if image_data is None:
+                    image_data = []
+                elif not isinstance(image_data, list):
+                    image_data = [image_data]
+                image_data.extend(new_images_this_turn)
 
             prompt_ids += tool_response_ids
             response_mask += [0] * len(tool_response_ids)
